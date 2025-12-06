@@ -2,101 +2,111 @@ import os
 import sys
 import google.cloud.aiplatform as aip
 import kfp
+from kfp import dsl
 from dotenv import load_dotenv
 
-# Load environment variables
+# Cargar variables de entorno
 load_dotenv()
 
+# Asegurar que Python encuentre la carpeta de componentes
 sys.path.append("src")
 
-PIPELIE_NAME = os.getenv("PIPELINE_NAME", "The-Iris-Pipeline-v1")
-PIPELINE_ROOT = os.getenv("PIPELINE_ROOT", "gs://your-bucket-name")
+# Configuración Global obtenida del .env
+PIPELINE_NAME = os.getenv("PIPELINE_NAME", "reddit-lstm-pipeline-v1")
+PIPELINE_ROOT = os.getenv("PIPELINE_ROOT")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+LOCATION = os.getenv("GCP_LOCATION")
 
-
-@kfp.dsl.pipeline(name=PIPELIE_NAME, pipeline_root=PIPELINE_ROOT)
+@dsl.pipeline(name=PIPELINE_NAME, pipeline_root=PIPELINE_ROOT)
 def pipeline(
     project_id: str,
-    location: str,
     bq_dataset: str,
     bq_table: str,
-    model_display_name: str,
-    endpoint_display_name: str,
-    deploy_model_flag: bool = True,
+    bucket_name: str,
+    embedding_path: str,
+    epochs: int = 5,
+    destination_folder: str = "modelos/reddit_produccion" # Carpeta final limpia
 ):
+    # Importamos los componentes aquí dentro para evitar errores de compilación
     from components.data import load_data
-    from components.evaluation import choose_best_model
-    from components.models import decision_tree, random_forest
-    from components.deploy import upload_model, deploy_model
+    from components.models import train_lstm_model
+    from components.evaluation import evaluate_lstm_model
+    from components.deploy import save_model_artifacts
 
-    # Load data from BigQuery
+    # --- PASO 1: Ingesta y Balanceo (BigQuery) ---
     data_op = load_data(
-        project_id=project_id, bq_dataset=bq_dataset, bq_table=bq_table
-    ).set_display_name("Load Data from BigQuery")
-
-    # Train Decision Tree model
-    dt_op = decision_tree(
-        train_dataset=data_op.outputs["train_dataset"]
-    ).set_display_name("Train Decision Tree")
-
-    # Train Random Forest model
-    rf_op = random_forest(
-        train_dataset=data_op.outputs["train_dataset"]
-    ).set_display_name("Train Random Forest")
-
-    # Choose best model based on evaluation
-    choose_model_op = choose_best_model(
-        test_dataset=data_op.outputs["test_dataset"],
-        decision_tree_model=dt_op.outputs["output_model"],
-        random_forest_model=rf_op.outputs["output_model"],
-    ).set_display_name("Select Best Model")
-
-    # Upload model to Vertex AI Model Registry
-    upload_op = upload_model(
         project_id=project_id,
-        location=location,
-        model_display_name=model_display_name,
-        model=choose_model_op.outputs["best_model"],
-    ).set_display_name("Register Model to Vertex AI")
+        bq_dataset=bq_dataset,
+        bq_table=bq_table
+    ).set_display_name("1. Ingesta y Balanceo")
 
-    # Conditionally deploy model to endpoint
-    with kfp.dsl.Condition(deploy_model_flag == True, name="Deploy Model"):
-        deploy_model(
-            project_id=project_id,
-            location=location,
-            endpoint_display_name=endpoint_display_name,
-            model=upload_op.outputs["vertex_model"],
-        ).set_display_name("Deploy Model to Endpoint")
+    # --- PASO 2: Entrenamiento (LSTM + Embeddings) ---
+    train_op = train_lstm_model(
+        train_dataset=data_op.outputs["train_dataset"],
+        bucket_name=bucket_name,
+        embedding_path=embedding_path,
+        epochs=epochs
+    ).set_display_name("2. Entrenar LSTM Bidireccional")
+    
+    # (Opcional) Aumentar memoria si el entrenamiento falla por OOM
+    # train_op.set_memory_limit('4G')
 
+    # --- PASO 3: Evaluación (Test Set) ---
+    eval_op = evaluate_lstm_model(
+        test_dataset=data_op.outputs["test_dataset"],
+        model_artifact=train_op.outputs["model_artifact"],
+        tokenizer_artifact=train_op.outputs["tokenizer_artifact"]
+    ).set_display_name("3. Evaluar Exactitud")
+
+    # --- PASO 4: Publicación de Artefactos (Sin Endpoint) ---
+    # Guarda el .keras y .pickle en una carpeta limpia del bucket
+    save_op = save_model_artifacts(
+        model_artifact=train_op.outputs["model_artifact"],
+        tokenizer_artifact=train_op.outputs["tokenizer_artifact"],
+        bucket_name=bucket_name,
+        destination_folder=destination_folder
+    ).set_display_name("4. Publicar Archivos Finales")
+    
+    # Ordenar ejecución: Guardar solo después de evaluar
+    save_op.after(eval_op)
 
 if __name__ == "__main__":
+    # Nombre del archivo compilado
+    compiler_file = "pipeline.yaml"
+
+    # 1. Compilar el pipeline
     kfp.compiler.Compiler().compile(
-        pipeline_func=pipeline, package_path=f"pipeline.yaml"
+        pipeline_func=pipeline, 
+        package_path=compiler_file
     )
+    print(f"✅ Pipeline compilado en {compiler_file}")
 
-    # Initialize the AI Platform SDK
+    # 2. Inicializar Vertex AI SDK
     aip.init(
-        project=os.getenv("GCP_PROJECT_ID"),
-        location=os.getenv("GCP_LOCATION"),
-        staging_bucket=os.getenv("PIPELINE_ROOT"),
+        project=PROJECT_ID,
+        location=LOCATION,
+        staging_bucket=PIPELINE_ROOT,
     )
 
-    # Create an AI Platform PipelineJob
+    # 3. Definir parámetros dinámicos (leyendo del .env)
+    pipeline_params = {
+        "project_id": PROJECT_ID,
+        "bq_dataset": os.getenv("BQ_DATASET"),
+        "bq_table": os.getenv("BQ_TABLE"),
+        "bucket_name": os.getenv("BUCKET_NAME"),
+        "embedding_path": os.getenv("EMBEDDING_PATH"),
+        "epochs": 5,
+        "destination_folder": "modelos/reddit_produccion_v1" # Puedes cambiar la versión aquí
+    }
+
+    # 4. Crear y Ejecutar el Job
+    print("🚀 Enviando Job a Vertex AI...")
     job = aip.PipelineJob(
-        display_name=os.getenv("PIPELINE_DISPLAY_NAME", "iris pipeline"),
-        template_path=f"pipeline.yaml",
-        pipeline_root=os.getenv("PIPELINE_ROOT"),
-        parameter_values={
-            "project_id": os.getenv("GCP_PROJECT_ID"),
-            "location": os.getenv("GCP_LOCATION"),
-            "bq_dataset": os.getenv("BQ_DATASET"),
-            "bq_table": os.getenv("BQ_TABLE"),
-            "model_display_name": os.getenv("MODEL_DISPLAY_NAME", "iris-classifier"),
-            "endpoint_display_name": os.getenv("ENDPOINT_DISPLAY_NAME", "iris-endpoint"),
-            "deploy_model_flag": os.getenv("DEPLOY_MODEL", "true").lower() == "true",
-        },
-        enable_caching=False,
+        display_name=PIPELINE_NAME,
+        template_path=compiler_file,
+        pipeline_root=PIPELINE_ROOT,
+        parameter_values=pipeline_params,
+        enable_caching=False, # False para obligar a correr todo de nuevo (útil para debug)
     )
 
-    # Run the pipeline job
-    job.run(
-    )
+    job.run()
