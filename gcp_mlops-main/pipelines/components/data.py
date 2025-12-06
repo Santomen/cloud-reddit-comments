@@ -11,7 +11,11 @@ load_dotenv()
         "pandas",
         "google-cloud-bigquery",
         "scikit-learn",
-        "db-dtypes"
+        "db-dtypes",
+        "numpy",
+        # Restricciones de seguridad para evitar conflictos de KFP
+        "protobuf<5.0.0",
+        "urllib3<2.0.0"
     ],
 )
 def load_data(
@@ -22,41 +26,85 @@ def load_data(
     test_dataset: Output[Dataset],
 ):
     import pandas as pd
+    import numpy as np
     from google.cloud import bigquery
     from sklearn.model_selection import train_test_split
+    from sklearn.utils import resample
 
-    client = bigquery.Client()
+    # 1. Carga Eficiente desde BigQuery
+    client = bigquery.Client(project=project_id)
+    
+    # Seleccionamos solo las columnas que nos importan
+    query = f"""
+        SELECT corpus, quartile_label 
+        FROM `{project_id}.{bq_dataset}.{bq_table}`
+    """
+    
+    print("Iniciando descarga de datos de BigQuery...")
+    df = client.query(query).to_dataframe()
+    print(f"Datos descargados. Total filas originales: {len(df)}")
 
-    dataset_ref = bigquery.DatasetReference(project_id, bq_dataset)
-    table_ref = dataset_ref.table(bq_table)
-    table = bigquery.Table(table_ref)
-    iterable_table = client.list_rows(table).to_dataframe_iterable()
+    # 2. Limpieza básica
+    df = df.dropna(subset=['corpus', 'quartile_label'])
+    
+    # 3. Mapeo de Etiquetas (S, M, L -> 0, 1, 2)
+    # Asumimos: S=Small (0), M=Medium (1), L=Large (2)
+    label_map = {'S': 0, 'M': 1, 'L': 2}
+    
+    # Validar que solo existan esas etiquetas o filtrar basura
+    df = df[df['quartile_label'].isin(label_map.keys())]
+    df['label'] = df['quartile_label'].map(label_map)
 
-    dfs = []
-    for row in iterable_table:
-        dfs.append(row)
+    # 4. Oversampling Automático
+    # Estrategia: Encontrar la clase con más ejemplos y subir las otras a ese nivel.
+    
+    # Contar ocurrencias por clase
+    conteo_clases = df['label'].value_counts()
+    clase_mayoritaria = conteo_clases.idxmax()
+    n_maximo = conteo_clases.max()
+    
+    print(f"Distribución antes del balanceo: \n{conteo_clases}")
+    
+    df_balanced_list = []
+    
+    # Iterar sobre cada clase (0, 1, 2)
+    for clase in df['label'].unique():
+        df_clase = df[df['label'] == clase]
+        
+        if clase == clase_mayoritaria:
+            df_balanced_list.append(df_clase)
+        else:
+            # Si es minoritaria, hacemos Upsampling (con reemplazo)
+            df_clase_upsampled = resample(
+                df_clase,
+                replace=True,     # Sample with replacement
+                n_samples=n_maximo, # Match majority class
+                random_state=42
+            )
+            df_balanced_list.append(df_clase_upsampled)
+            
+    df_balanced = pd.concat(df_balanced_list)
+    
+    # Mezclar filas (Shuffle) para que no queden ordenadas por clase
+    df_balanced = df_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    print(f"Total filas después del oversampling: {len(df_balanced)}")
+    print(f"Distribución balanceada: \n{df_balanced['label'].value_counts()}")
 
-    df = pd.concat(dfs, ignore_index=True)
-    del dfs
-
-    df["Species"].replace(
-        {
-            "Iris-versicolor": 0,
-            "Iris-virginica": 1,
-            "Iris-setosa": 2,
-        },
-        inplace=True,
-    )
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        df.drop("Species", axis=1),
-        df["Species"],
+    # 5. Dividir en Train y Test
+    # Usamos stratify para asegurar que la distribución se mantenga en el split
+    X_train, X_test = train_test_split(
+        df_balanced,
         test_size=0.2,
         random_state=42,
+        stratify=df_balanced['label']
     )
 
-    X_train["Species"] = y_train
-    X_test["Species"] = y_test
-
-    X_train.to_csv(f"{train_dataset.path}", index=False)
-    X_test.to_csv(f"{test_dataset.path}", index=False)
+    # 6. Guardar CSVs para el siguiente paso
+    # Guardamos 'corpus' (texto) y 'label' (número ya mapeado)
+    output_columns = ['corpus', 'label']
+    
+    X_train[output_columns].to_csv(train_dataset.path, index=False)
+    X_test[output_columns].to_csv(test_dataset.path, index=False)
+    
+    print("Datos procesados y guardados exitosamente.")
