@@ -5,41 +5,75 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-
 @component(
-    base_image=os.getenv("BASE_IMAGE", "python:3.11-slim"),
+    base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"),
     packages_to_install=[
         "pandas",
-        "joblib",
-        "scikit-learn==1.3.2",
+        "numpy",
+        "tensorflow",
+        "scikit-learn",
+        "protobuf<5.0.0", 
+        "urllib3<2.0.0"
     ],
 )
-def choose_best_model(
+def evaluate_lstm_model(
     test_dataset: Input[Dataset],
-    decision_tree_model: Input[Model],
-    random_forest_model: Input[Model],
+    model_artifact: Input[Model],      # El modelo entrenado (.keras)
+    tokenizer_artifact: Input[Model],  # El diccionario (.pickle)
     metrics: Output[Metrics],
-    best_model: Output[Model],
 ):
-    import joblib
     import pandas as pd
-    from sklearn.metrics import accuracy_score
+    import numpy as np
+    import pickle
+    import tensorflow as tf
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.preprocessing.sequence import pad_sequences
+    from sklearn.metrics import accuracy_score, confusion_matrix
 
-    test_data = pd.read_csv(test_dataset.path)
+    # --- 1. CONFIGURACIÓN NLP (Debe coincidir con models.py) ---
+    MAX_LENGTH = 100
+    TRUNC_TYPE = 'post'
+    PADDING_TYPE = 'post'
 
-    dt = joblib.load(decision_tree_model.path)
-    rf = joblib.load(random_forest_model.path)
+    # --- 2. CARGAR ARTEFACTOS ---
+    print("Cargando modelo y tokenizer...")
+    
+    # Cargar Tokenizer
+    with open(tokenizer_artifact.path, 'rb') as handle:
+        tokenizer = pickle.load(handle)
+        
+    # Cargar Modelo
+    # Keras necesita la extensión exacta a veces
+    model_path = model_artifact.path
+    if not os.path.exists(model_path) and os.path.exists(model_path + ".keras"):
+        model_path += ".keras"
+        
+    model = load_model(model_path)
 
-    dt_pred = dt.predict(test_data.drop("Species", axis=1))
-    rf_pred = rf.predict(test_data.drop("Species", axis=1))
+    # --- 3. CARGAR Y PROCESAR DATOS DE TEST ---
+    print("Cargando datos de prueba...")
+    df_test = pd.read_csv(test_dataset.path)
+    
+    # Convertir texto a secuencias usando el tokenizer ENTRENADO
+    sentences = df_test['corpus'].astype(str).tolist()
+    labels = df_test['label'].values
+    
+    sequences = tokenizer.texts_to_sequences(sentences)
+    padded = pad_sequences(sequences, maxlen=MAX_LENGTH, padding=PADDING_TYPE, truncating=TRUNC_TYPE)
 
-    dt_accuracy = accuracy_score(test_data["Species"], dt_pred)
-    rf_accuracy = accuracy_score(test_data["Species"], rf_pred)
+    # --- 4. EVALUAR ---
+    print("Evaluando modelo...")
+    loss, accuracy = model.evaluate(padded, labels, verbose=0)
+    print(f"Test Accuracy: {accuracy}")
 
-    metrics.log_metric("Decision Tree (Accuracy)", (dt_accuracy))
-    metrics.log_metric("Random Forest (Accuracy)", (rf_accuracy))
-
-    if dt_accuracy > rf_accuracy:
-        joblib.dump(dt, best_model.path)
-    else:
-        joblib.dump(rf, best_model.path)
+    # Loguear métrica principal para verla en Vertex AI
+    metrics.log_metric("Test Accuracy", accuracy)
+    metrics.log_metric("Test Loss", loss)
+    
+    # (Opcional) Generar matriz de confusión para logs
+    predictions = model.predict(padded)
+    pred_classes = np.argmax(predictions, axis=1)
+    
+    cm = confusion_matrix(labels, pred_classes)
+    print("Matriz de Confusión:")
+    print(cm)
