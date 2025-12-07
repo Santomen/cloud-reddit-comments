@@ -1,11 +1,10 @@
 import os
 from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
-from dotenv import load_dotenv
+# Si usas dotenv aquí, descomenta la siguiente línea, si no, puedes quitarla
+# from dotenv import load_dotenv
 
-# Cargar variables de entorno (opcional aquí si ya se cargan en pipeline.py, pero no hace daño)
-load_dotenv()
 @component(
-    base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"), # Esto usa el os del inicio (correcto)
+    base_image="python:3.10-slim",  # O usa os.getenv si tienes load_dotenv funcionando
     packages_to_install=[
         "pandas",
         "numpy",
@@ -15,16 +14,15 @@ load_dotenv()
         "urllib3<2.0.0"
     ],
 )
-
 def evaluate_lstm_model(
     test_dataset: Input[Dataset],
     model_artifact: Input[Model],      
     tokenizer_artifact: Input[Model],  
     metrics: Output[Metrics],
 ):
-    # --- AQUÍ FALTABA EL IMPORT ---
-    import os  # <--- ESTO SOLUCIONARÁ EL ERROR
-    # ------------------------------
+    # --- ¡ESTA ES LA CLAVE! ---
+    import os  # <--- ESTE IMPORT ES EL QUE ARREGLA TU ERROR ACTUAL
+    # --------------------------
     import pandas as pd
     import numpy as np
     import pickle
@@ -45,15 +43,14 @@ def evaluate_lstm_model(
     with open(tokenizer_artifact.path, 'rb') as handle:
         tokenizer = pickle.load(handle)
         
-    # Cargar Modelo
-    # Ahora sí funcionará os.path.exists
+    # Cargar Modelo con verificación segura
     model_path = model_artifact.path
     if not os.path.exists(model_path) and os.path.exists(model_path + ".keras"):
         model_path += ".keras"
         
     model = load_model(model_path)
 
-    # --- 3. CARGAR Y PROCESAR DATOS DE TEST ---
+    # --- 3. CARGAR Y PROCESAR DATOS ---
     print("Cargando datos de prueba...")
     df_test = pd.read_csv(test_dataset.path)
     
@@ -68,14 +65,5 @@ def evaluate_lstm_model(
     loss, accuracy = model.evaluate(padded, labels, verbose=0)
     print(f"Test Accuracy: {accuracy}")
 
-    # Loguear métrica principal
     metrics.log_metric("Test Accuracy", accuracy)
     metrics.log_metric("Test Loss", loss)
-    
-    # Matriz de confusión
-    predictions = model.predict(padded)
-    pred_classes = np.argmax(predictions, axis=1)
-    
-    cm = confusion_matrix(labels, pred_classes)
-    print("Matriz de Confusión:")
-    print(cm)
