@@ -1,3 +1,9 @@
+import os
+from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
+from dotenv import load_dotenv
+
+# Cargar variables de entorno (opcional aquí si ya se cargan en pipeline.py, pero no hace daño)
+load_dotenv()
 @component(
     base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"), # Esto usa el os del inicio (correcto)
     packages_to_install=[
