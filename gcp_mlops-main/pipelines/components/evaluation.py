@@ -1,12 +1,5 @@
-import os
-from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
 @component(
-    base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"),
+    base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"), # Esto usa el os del inicio (correcto)
     packages_to_install=[
         "pandas",
         "numpy",
@@ -18,10 +11,13 @@ load_dotenv()
 )
 def evaluate_lstm_model(
     test_dataset: Input[Dataset],
-    model_artifact: Input[Model],      # El modelo entrenado (.keras)
-    tokenizer_artifact: Input[Model],  # El diccionario (.pickle)
+    model_artifact: Input[Model],      
+    tokenizer_artifact: Input[Model],  
     metrics: Output[Metrics],
 ):
+    # --- AQUÍ FALTABA EL IMPORT ---
+    import os  # <--- ESTO SOLUCIONARÁ EL ERROR
+    # ------------------------------
     import pandas as pd
     import numpy as np
     import pickle
@@ -30,7 +26,7 @@ def evaluate_lstm_model(
     from tensorflow.keras.preprocessing.sequence import pad_sequences
     from sklearn.metrics import accuracy_score, confusion_matrix
 
-    # --- 1. CONFIGURACIÓN NLP (Debe coincidir con models.py) ---
+    # --- 1. CONFIGURACIÓN NLP ---
     MAX_LENGTH = 100
     TRUNC_TYPE = 'post'
     PADDING_TYPE = 'post'
@@ -43,7 +39,7 @@ def evaluate_lstm_model(
         tokenizer = pickle.load(handle)
         
     # Cargar Modelo
-    # Keras necesita la extensión exacta a veces
+    # Ahora sí funcionará os.path.exists
     model_path = model_artifact.path
     if not os.path.exists(model_path) and os.path.exists(model_path + ".keras"):
         model_path += ".keras"
@@ -54,7 +50,6 @@ def evaluate_lstm_model(
     print("Cargando datos de prueba...")
     df_test = pd.read_csv(test_dataset.path)
     
-    # Convertir texto a secuencias usando el tokenizer ENTRENADO
     sentences = df_test['corpus'].astype(str).tolist()
     labels = df_test['label'].values
     
@@ -66,11 +61,11 @@ def evaluate_lstm_model(
     loss, accuracy = model.evaluate(padded, labels, verbose=0)
     print(f"Test Accuracy: {accuracy}")
 
-    # Loguear métrica principal para verla en Vertex AI
+    # Loguear métrica principal
     metrics.log_metric("Test Accuracy", accuracy)
     metrics.log_metric("Test Loss", loss)
     
-    # (Opcional) Generar matriz de confusión para logs
+    # Matriz de confusión
     predictions = model.predict(padded)
     pred_classes = np.argmax(predictions, axis=1)
     
