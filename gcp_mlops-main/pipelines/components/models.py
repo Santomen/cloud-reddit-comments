@@ -161,3 +161,24 @@ def train_lstm_model(
         pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     print("Modelo y Tokenizer guardados correctamente.")
+
+
+
+
+
+
+# --- 9. GUARDAR ARTEFACTOS ---
+# Guardar el modelo como archivo .keras DENTRO del path real del contenedor
+model_path = model_artifact.path
+
+if os.path.isdir(model_path):
+    model_file = os.path.join(model_path, "model.keras")
+else:
+    # si KFP entrega un archivo sin extensión, forzar extensión
+    model_file = model_path if model_path.endswith(".keras") else model_path + ".keras"
+
+model.save(model_file)
+
+# Guardar tokenizer
+with open(tokenizer_artifact.path, "wb") as f:
+    pickle.dump(tokenizer, f)
