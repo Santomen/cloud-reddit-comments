@@ -41,16 +41,13 @@ def evaluate_lstm_model(
     model_path = model_artifact.path
     print(f"Path original recibido de Vertex AI: {model_path}")
 
-    # --- CORRECCIÓN DE ERROR "Invalid filename" ---
-    # Keras 3 obliga a que el archivo termine en .keras. 
-    # Si Kubeflow nos dio un path sin extensión, lo renombramos aquí mismo.
+
     if not model_path.endswith(".keras"):
         new_path = model_path + ".keras"
         print(f"Renombrando archivo a: {new_path}")
         os.rename(model_path, new_path)
         model_path = new_path
         
-    # Ahora cargamos desde el path que seguro termina en .keras
     model = load_model(model_path)
     print("Modelo cargado exitosamente.")
 
