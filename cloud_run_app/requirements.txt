@@ -1,0 +1,5 @@
+flask
+tensorflow
+numpy
+google-cloud-storage
+gunicorn  # Servidor WSGI recomendado para producción en Cloud Run

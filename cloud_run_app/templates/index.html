@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analizador de Nivel de Debate</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 800px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        textarea {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box; /* Incluye padding y borde en el ancho total */
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            background-color: #e9ecef;
+            border-left: 5px solid #007bff;
+        }
+        .error {
+            border-left: 5px solid #dc3545;
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🗣️ Analizador de Nivel de Debate (Reddit)</h1>
+        <p>Introduce un texto para predecir el nivel de debate que podría generar (Clase 0: Bajo, Clase 1: Medio, Clase 2: Alto).</p>
+        
+        <form method="POST" action="/">
+            <label for="post_text">Contenido del Post:</label>
+            <textarea id="post_text" name="post_text" rows="8" placeholder="Escribe el texto de tu post aquí..." required>{{ input_text }}</textarea>
+            
+            <button type="submit">Predecir Nivel de Debate</button>
+        </form>
+
+        {% if result %}
+            <div class="result {% if result.error %}error{% endif %}">
+                {% if result.error %}
+                    <strong>❌ Error:</strong> {{ result.error }}
+                {% else %}
+                    <strong>✅ Predicción:</strong> {{ result.clase }}
+                    <br>
+                    <strong>Confianza:</strong> {{ result.confianza }}
+                {% endif %}
+            </div>
+        {% endif %}
+
+    </div>
+</body>
+</html>
