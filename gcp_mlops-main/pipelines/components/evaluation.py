@@ -1,82 +1,79 @@
 import os
-from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
+from kfp.dsl import Input, Model, component
 
 @component(
     base_image="python:3.10-slim",
     packages_to_install=[
-        "pandas",
-        "numpy",
-        "tensorflow",
-        "scikit-learn",
-        "protobuf<5.0.0", 
+        "google-cloud-storage<3.0.0",
+        "kfp",
+        "protobuf<5.0.0",
         "urllib3<2.0.0"
     ],
 )
-def evaluate_lstm_model(
-    test_dataset: Input[Dataset],
-    model_artifact: Input[Model],      
-    tokenizer_artifact: Input[Model],  
-    metrics: Output[Metrics],
+def save_model_artifacts(
+    model_artifact: Input[Model],       
+    tokenizer_artifact: Input[Model],   
+    bucket_name: str,
+    destination_folder: str = "modelos/produccion", 
 ):
+    from google.cloud import storage
     import os
-    import pandas as pd
-    import numpy as np
-    import pickle
-    import tensorflow as tf
-    from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing.sequence import pad_sequences
-    from sklearn.metrics import accuracy_score, confusion_matrix
-
-    # --- 1. CONFIGURACIÓN NLP ---
-    MAX_LENGTH = 100
-    TRUNC_TYPE = 'post'
-    PADDING_TYPE = 'post'
-
-    # --- 2. CARGAR ARTEFACTOS ---
-    print("Cargando tokenizer...")
-    with open(tokenizer_artifact.path, 'rb') as handle:
-        tokenizer = pickle.load(handle)
-        
-    print("Cargando modelo...")
-    model_path = model_artifact.path
-    print(f"Path original recibido de Vertex AI: {model_path}")
-
-    # --- CORRECCIÓN DE ERROR "Invalid filename" ---
-    # Keras 3 obliga a que el archivo termine en .keras. 
-    # Si Kubeflow nos dio un path sin extensión, lo renombramos aquí mismo.
-    if not model_path.endswith(".keras"):
-        new_path = model_path + ".keras"
-        print(f"Renombrando archivo a: {new_path}")
-        os.rename(model_path, new_path)
-        model_path = new_path
-        
-    # Ahora cargamos desde el path que seguro termina en .keras
-    model = load_model(model_path)
-    print("Modelo cargado exitosamente.")
-
-    # --- 3. CARGAR Y PROCESAR DATOS DE TEST ---
-    print("Cargando datos de prueba...")
-    df_test = pd.read_csv(test_dataset.path)
     
-    sentences = df_test['corpus'].astype(str).tolist()
-    labels = df_test['label'].values
+    print(f"Iniciando despliegue a: gs://{bucket_name}/{destination_folder}")
     
-    sequences = tokenizer.texts_to_sequences(sentences)
-    padded = pad_sequences(sequences, maxlen=MAX_LENGTH, padding=PADDING_TYPE, truncating=TRUNC_TYPE)
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
 
-    # --- 4. EVALUAR ---
-    print("Evaluando modelo...")
-    loss, accuracy = model.evaluate(padded, labels, verbose=0)
-    print(f"Test Accuracy: {accuracy}")
+    # --- 1. ENCONTRAR EL MODELO (SIN RENOMBRARLO) ---
+    base_path = model_artifact.path
+    final_source_path = None
+    
+    print(f"Path base recibido de Vertex: {base_path}")
 
-    # Loguear métrica principal
-    metrics.log_metric("Test Accuracy", accuracy)
-    metrics.log_metric("Test Loss", loss)
+    # ESTRATEGIA: Buscar qué archivo existe realmente
+    if os.path.exists(base_path) and os.path.isfile(base_path):
+        print("-> Encontrado archivo exacto en el path base.")
+        final_source_path = base_path
+    elif os.path.exists(base_path + ".keras"):
+        print("-> Encontrado archivo con sufijo .keras oculto.")
+        final_source_path = base_path + ".keras"
+    elif os.path.isdir(base_path):
+        print("-> Es un directorio. Buscando contenido...")
+        files = os.listdir(base_path)
+        # Buscar cualquier archivo grande que parezca el modelo
+        found = next((f for f in files if f.endswith(('.keras', '.h5'))), None)
+        if found:
+            final_source_path = os.path.join(base_path, found)
+            print(f"-> Archivo encontrado dentro del directorio: {found}")
     
-    # (Opcional) Generar matriz de confusión para logs
-    predictions = model.predict(padded)
-    pred_classes = np.argmax(predictions, axis=1)
+    # Si aún no lo encontramos, listamos el directorio padre para ver qué demonios hay
+    if not final_source_path:
+        parent_dir = os.path.dirname(base_path)
+        print(f"ERROR: No se encuentra el archivo. Listando directorio padre {parent_dir}:")
+        if os.path.exists(parent_dir):
+            print(os.listdir(parent_dir))
+        raise RuntimeError("No se pudo localizar el archivo del modelo para subirlo.")
+
+    # --- 2. SUBIRLO CON EL NOMBRE CORRECTO ---
+    # Aquí está el truco: Leemos 'final_source_path' (que puede no tener extensión)
+    # y lo escribimos en el bucket como 'model.keras'.
     
-    cm = confusion_matrix(labels, pred_classes)
-    print("Matriz de Confusión:")
-    print(cm)
+    destination_model_blob = f"{destination_folder}/model.keras"
+    blob_model = bucket.blob(destination_model_blob)
+    
+    print(f"Subiendo desde: {final_source_path}")
+    print(f"Hacia Bucket: {destination_model_blob}")
+    
+    blob_model.upload_from_filename(final_source_path)
+    print(">>> Modelo subido EXITOSAMENTE.")
+
+    # --- 3. SUBIR TOKENIZER ---
+    tokenizer_path = tokenizer_artifact.path
+    destination_tok_blob = f"{destination_folder}/tokenizer.pickle"
+    blob_tok = bucket.blob(destination_tok_blob)
+    
+    print(f"Subiendo tokenizer...")
+    blob_tok.upload_from_filename(tokenizer_path)
+    print(">>> Tokenizer subido EXITOSAMENTE.")
+
+    print("¡Todo completado!")
