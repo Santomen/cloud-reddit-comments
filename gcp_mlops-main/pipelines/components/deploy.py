@@ -1,110 +1,79 @@
 import os
-from kfp.dsl import Dataset, Output, component
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from kfp.dsl import Input, Model, component
 
 @component(
-    base_image=os.getenv("BASE_IMAGE", "python:3.11-slim"),
+    base_image="python:3.10-slim",
     packages_to_install=[
-        "pandas",
-        "google-cloud-bigquery",
-        "scikit-learn",
-        "db-dtypes",
-        "numpy",
-        # Restricciones de seguridad para evitar conflictos de KFP
+        "google-cloud-storage<3.0.0",
+        "kfp",
         "protobuf<5.0.0",
         "urllib3<2.0.0"
     ],
 )
-def load_data(
-    project_id: str,
-    bq_dataset: str,
-    bq_table: str,
-    train_dataset: Output[Dataset],
-    test_dataset: Output[Dataset],
+def save_model_artifacts(
+    model_artifact: Input[Model],       
+    tokenizer_artifact: Input[Model],   
+    bucket_name: str,
+    destination_folder: str = "modelos/produccion", 
 ):
-    import pandas as pd
-    import numpy as np
-    from google.cloud import bigquery
-    from sklearn.model_selection import train_test_split
-    from sklearn.utils import resample
+    from google.cloud import storage
+    import os
+    
+    print(f"Iniciando despliegue a: gs://{bucket_name}/{destination_folder}")
+    
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
 
-    # 1. Carga Eficiente desde BigQuery
-    client = bigquery.Client(project=project_id)
+    # --- 1. ENCONTRAR EL MODELO (SIN RENOMBRARLO) ---
+    base_path = model_artifact.path
+    final_source_path = None
     
-    # Seleccionamos solo las columnas que nos importan
-    query = f"""
-        SELECT corpus, quartile_label 
-        FROM `{project_id}.{bq_dataset}.{bq_table}`
-    """
-    
-    print("Iniciando descarga de datos de BigQuery...")
-    df = client.query(query).to_dataframe()
-    print(f"Datos descargados. Total filas originales: {len(df)}")
+    print(f"Path base recibido de Vertex: {base_path}")
 
-    # 2. Limpieza básica
-    df = df.dropna(subset=['corpus', 'quartile_label'])
+    # ESTRATEGIA: Buscar qué archivo existe realmente
+    if os.path.exists(base_path) and os.path.isfile(base_path):
+        print("-> Encontrado archivo exacto en el path base.")
+        final_source_path = base_path
+    elif os.path.exists(base_path + ".keras"):
+        print("-> Encontrado archivo con sufijo .keras oculto.")
+        final_source_path = base_path + ".keras"
+    elif os.path.isdir(base_path):
+        print("-> Es un directorio. Buscando contenido...")
+        files = os.listdir(base_path)
+        # Buscar cualquier archivo grande que parezca el modelo
+        found = next((f for f in files if f.endswith(('.keras', '.h5'))), None)
+        if found:
+            final_source_path = os.path.join(base_path, found)
+            print(f"-> Archivo encontrado dentro del directorio: {found}")
     
-    # 3. Mapeo de Etiquetas (S, M, L -> 0, 1, 2)
-    # Asumimos: S=Small (0), M=Medium (1), L=Large (2)
-    label_map = {'S': 0, 'M': 1, 'L': 2}
-    
-    # Validar que solo existan esas etiquetas o filtrar basura
-    df = df[df['quartile_label'].isin(label_map.keys())]
-    df['label'] = df['quartile_label'].map(label_map)
+    # Si aún no lo encontramos, listamos el directorio padre para ver qué demonios hay
+    if not final_source_path:
+        parent_dir = os.path.dirname(base_path)
+        print(f"ERROR: No se encuentra el archivo. Listando directorio padre {parent_dir}:")
+        if os.path.exists(parent_dir):
+            print(os.listdir(parent_dir))
+        raise RuntimeError("No se pudo localizar el archivo del modelo para subirlo.")
 
-    # 4. Oversampling Automático
-    # Estrategia: Encontrar la clase con más ejemplos y subir las otras a ese nivel.
+    # --- 2. SUBIRLO CON EL NOMBRE CORRECTO ---
+    # Aquí está el truco: Leemos 'final_source_path' (que puede no tener extensión)
+    # y lo escribimos en el bucket como 'model.keras'.
     
-    # Contar ocurrencias por clase
-    conteo_clases = df['label'].value_counts()
-    clase_mayoritaria = conteo_clases.idxmax()
-    n_maximo = conteo_clases.max()
+    destination_model_blob = f"{destination_folder}/model.keras"
+    blob_model = bucket.blob(destination_model_blob)
     
-    print(f"Distribución antes del balanceo: \n{conteo_clases}")
+    print(f"Subiendo desde: {final_source_path}")
+    print(f"Hacia Bucket: {destination_model_blob}")
     
-    df_balanced_list = []
-    
-    # Iterar sobre cada clase (0, 1, 2)
-    for clase in df['label'].unique():
-        df_clase = df[df['label'] == clase]
-        
-        if clase == clase_mayoritaria:
-            df_balanced_list.append(df_clase)
-        else:
-            # Si es minoritaria, hacemos Upsampling (con reemplazo)
-            df_clase_upsampled = resample(
-                df_clase,
-                replace=True,     # Sample with replacement
-                n_samples=n_maximo, # Match majority class
-                random_state=42
-            )
-            df_balanced_list.append(df_clase_upsampled)
-            
-    df_balanced = pd.concat(df_balanced_list)
-    
-    # Mezclar filas (Shuffle) para que no queden ordenadas por clase
-    df_balanced = df_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    print(f"Total filas después del oversampling: {len(df_balanced)}")
-    print(f"Distribución balanceada: \n{df_balanced['label'].value_counts()}")
+    blob_model.upload_from_filename(final_source_path)
+    print(">>> Modelo subido EXITOSAMENTE.")
 
-    # 5. Dividir en Train y Test
-    # Usamos stratify para asegurar que la distribución se mantenga en el split
-    X_train, X_test = train_test_split(
-        df_balanced,
-        test_size=0.2,
-        random_state=42,
-        stratify=df_balanced['label']
-    )
+    # --- 3. SUBIR TOKENIZER ---
+    tokenizer_path = tokenizer_artifact.path
+    destination_tok_blob = f"{destination_folder}/tokenizer.pickle"
+    blob_tok = bucket.blob(destination_tok_blob)
+    
+    print(f"Subiendo tokenizer...")
+    blob_tok.upload_from_filename(tokenizer_path)
+    print(">>> Tokenizer subido EXITOSAMENTE.")
 
-    # 6. Guardar CSVs para el siguiente paso
-    # Guardamos 'corpus' (texto) y 'label' (número ya mapeado)
-    output_columns = ['corpus', 'label']
-    
-    X_train[output_columns].to_csv(train_dataset.path, index=False)
-    X_test[output_columns].to_csv(test_dataset.path, index=False)
-    
-    print("Datos procesados y guardados exitosamente.")
+    print("¡Todo completado!")
