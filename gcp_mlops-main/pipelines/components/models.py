@@ -2,7 +2,6 @@ import os
 from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 @component(
