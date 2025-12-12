@@ -1,126 +1,79 @@
 import os
-from kfp.dsl import Dataset, Input, Metrics, Model, Output, component
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from kfp.dsl import Input, Model, component
 
 @component(
-    base_image=os.getenv("BASE_IMAGE", "python:3.10-slim"),
+    base_image="python:3.10-slim",
     packages_to_install=[
-        "pandas",
-        "numpy",
-        "tensorflow", 
-        "scikit-learn",
-        "google-cloud-storage",
+        "google-cloud-storage<3.0.0",
+        "kfp",
         "protobuf<5.0.0",
         "urllib3<2.0.0"
     ],
 )
-def train_lstm_model(
-    train_dataset: Input[Dataset],
-    model_artifact: Output[Model],
-    tokenizer_artifact: Output[Model],
-    metrics: Output[Metrics],
+def save_model_artifacts(
+    model_artifact: Input[Model],       
+    tokenizer_artifact: Input[Model],   
     bucket_name: str,
-    embedding_path: str,
-    epochs: int = 5,
-    batch_size: int = 32,
+    destination_folder: str = "modelos/produccion", 
 ):
-    import pandas as pd
-    import numpy as np
-    import pickle
-    import tensorflow as tf
     from google.cloud import storage
-    from tensorflow.keras.preprocessing.text import Tokenizer
-    from tensorflow.keras.preprocessing.sequence import pad_sequences
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional
-    import shutil
-
-    # Config
-    VOCAB_SIZE = 20000
-    MAX_LENGTH = 100
-    EMBEDDING_DIM = 100
-    TRUNC_TYPE = 'post'
-    PADDING_TYPE = 'post'
-    OOV_TOK = "<OOV>"
-
-    # Cargar dataset
-    df = pd.read_csv(train_dataset.path)
-    sentences = df['corpus'].astype(str).tolist()
-    labels = df['label'].values
-
-    # Descargar embeddings desde GCS
-    local_embedding_file = 'glove_embeddings.txt'
+    import os
+    
+    print(f"Iniciando despliegue a: gs://{bucket_name}/{destination_folder}")
+    
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(embedding_path)
-    blob.download_to_filename(local_embedding_file)
 
-    # Tokenización
-    tokenizer = Tokenizer(num_words=VOCAB_SIZE, oov_token=OOV_TOK)
-    tokenizer.fit_on_texts(sentences)
-    word_index = tokenizer.word_index
-    sequences = tokenizer.texts_to_sequences(sentences)
-    padded_sequences = pad_sequences(sequences, maxlen=MAX_LENGTH, padding=PADDING_TYPE, truncating=TRUNC_TYPE)
+    # --- 1. ENCONTRAR EL MODELO (SIN RENOMBRARLO) ---
+    base_path = model_artifact.path
+    final_source_path = None
+    
+    print(f"Path base recibido de Vertex: {base_path}")
 
-    # Matriz de embeddings
-    embeddings_index = {}
-    with open(local_embedding_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            values = line.split()
-            word = values[0]
-            coefs = np.asarray(values[1:], dtype='float32')
-            embeddings_index[word] = coefs
+    # ESTRATEGIA: Buscar qué archivo existe realmente
+    if os.path.exists(base_path) and os.path.isfile(base_path):
+        print("-> Encontrado archivo exacto en el path base.")
+        final_source_path = base_path
+    elif os.path.exists(base_path + ".keras"):
+        print("-> Encontrado archivo con sufijo .keras oculto.")
+        final_source_path = base_path + ".keras"
+    elif os.path.isdir(base_path):
+        print("-> Es un directorio. Buscando contenido...")
+        files = os.listdir(base_path)
+        # Buscar cualquier archivo grande que parezca el modelo
+        found = next((f for f in files if f.endswith(('.keras', '.h5'))), None)
+        if found:
+            final_source_path = os.path.join(base_path, found)
+            print(f"-> Archivo encontrado dentro del directorio: {found}")
+    
+    # Si aún no lo encontramos, listamos el directorio padre para ver qué demonios hay
+    if not final_source_path:
+        parent_dir = os.path.dirname(base_path)
+        print(f"ERROR: No se encuentra el archivo. Listando directorio padre {parent_dir}:")
+        if os.path.exists(parent_dir):
+            print(os.listdir(parent_dir))
+        raise RuntimeError("No se pudo localizar el archivo del modelo para subirlo.")
 
-    num_words = min(VOCAB_SIZE, len(word_index) + 1)
-    embedding_matrix = np.zeros((num_words, EMBEDDING_DIM))
+    # --- 2. SUBIRLO CON EL NOMBRE CORRECTO ---
+    # Aquí está el truco: Leemos 'final_source_path' (que puede no tener extensión)
+    # y lo escribimos en el bucket como 'model.keras'.
+    
+    destination_model_blob = f"{destination_folder}/model.keras"
+    blob_model = bucket.blob(destination_model_blob)
+    
+    print(f"Subiendo desde: {final_source_path}")
+    print(f"Hacia Bucket: {destination_model_blob}")
+    
+    blob_model.upload_from_filename(final_source_path)
+    print(">>> Modelo subido EXITOSAMENTE.")
 
-    for word, i in word_index.items():
-        if i >= VOCAB_SIZE:
-            continue
-        embedding_vector = embeddings_index.get(word)
-        if embedding_vector is not None:
-            embedding_matrix[i] = embedding_vector
+    # --- 3. SUBIR TOKENIZER ---
+    tokenizer_path = tokenizer_artifact.path
+    destination_tok_blob = f"{destination_folder}/tokenizer.pickle"
+    blob_tok = bucket.blob(destination_tok_blob)
+    
+    print(f"Subiendo tokenizer...")
+    blob_tok.upload_from_filename(tokenizer_path)
+    print(">>> Tokenizer subido EXITOSAMENTE.")
 
-    # Modelo LSTM
-    model = Sequential([
-        Embedding(num_words, EMBEDDING_DIM, input_length=MAX_LENGTH, weights=[embedding_matrix], trainable=False),
-        Bidirectional(LSTM(64, return_sequences=False)),
-        Dropout(0.5),
-        Dense(32, activation='relu'),
-        Dense(3, activation='softmax')
-    ])
-
-    model.compile(loss='sparse_categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-
-    history = model.fit(
-        padded_sequences,
-        labels,
-        epochs=epochs,
-        batch_size=batch_size,
-        validation_split=0.1,
-        verbose=2
-    )
-
-    # Métricas
-    final_acc = history.history['accuracy'][-1]
-    val_acc = history.history['val_accuracy'][-1]
-    metrics.log_metric("accuracy", final_acc)
-    metrics.log_metric("val_accuracy", val_acc)
-
-    # Guardar modelo
-    model_path = model_artifact.path
-    if not model_path.endswith(".keras"):
-        fixed_path = model_path + ".keras"
-        model.save(fixed_path)
-        shutil.copy(fixed_path, model_artifact.path)
-    else:
-        model.save(model_path)
-
-    # Guardar tokenizer
-    with open(tokenizer_artifact.path, 'wb') as handle:
-        pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    print("Modelo y Tokenizer guardados correctamente.")
+    print("¡Todo completado!")
