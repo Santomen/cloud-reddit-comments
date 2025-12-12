@@ -13,7 +13,6 @@ load_dotenv()
         "scikit-learn",
         "db-dtypes",
         "numpy",
-        # Restricciones de seguridad para evitar conflictos de KFP
         "protobuf<5.0.0",
         "urllib3<2.0.0"
     ],
