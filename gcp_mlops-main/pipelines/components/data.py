@@ -47,7 +47,7 @@ def load_data(
     df = df.dropna(subset=['corpus', 'quartile_label'])
     
     # 3. Mapeo de Etiquetas (S, M, L -> 0, 1, 2)
-    # Asumimos: S=Small (0), M=Medium (1), L=Large (2)
+    # S=Small (0), M=Medium (1), L=Large (2)
     label_map = {'S': 0, 'M': 1, 'L': 2}
     
     # Validar que solo existan esas etiquetas o filtrar basura
@@ -76,7 +76,7 @@ def load_data(
             # Si es minoritaria, hacemos Upsampling (con reemplazo)
             df_clase_upsampled = resample(
                 df_clase,
-                replace=True,     # Sample with replacement
+                replace=True,     
                 n_samples=n_maximo, # Match majority class
                 random_state=42
             )
@@ -84,14 +84,13 @@ def load_data(
             
     df_balanced = pd.concat(df_balanced_list)
     
-    # Mezclar filas (Shuffle) para que no queden ordenadas por clase
+ 
     df_balanced = df_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
     
     print(f"Total filas después del oversampling: {len(df_balanced)}")
     print(f"Distribución balanceada: \n{df_balanced['label'].value_counts()}")
 
     # 5. Dividir en Train y Test
-    # Usamos stratify para asegurar que la distribución se mantenga en el split
     X_train, X_test = train_test_split(
         df_balanced,
         test_size=0.2,
@@ -100,7 +99,6 @@ def load_data(
     )
 
     # 6. Guardar CSVs para el siguiente paso
-    # Guardamos 'corpus' (texto) y 'label' (número ya mapeado)
     output_columns = ['corpus', 'label']
     
     X_train[output_columns].to_csv(train_dataset.path, index=False)
